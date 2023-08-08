@@ -6,7 +6,7 @@ const posts = [
   //   { id: 1, content: 'bla', created: Date.now(), removed: false },
   //   { id: 2, content: 'bla', created: Date.now(), removed: false },
 ];
-const connetionString = 'postgres://postgres:postgres@localhost:5432/db';
+const connetionString = 'postgres://app:pass@localhost:5432/db';
 const pool = new pg.Pool({
   connectionString: connetionString,
 });
@@ -16,13 +16,8 @@ pool.on('connect', () => {
 });
 pool.on('error', (err) => {
   console.log(err);
-  pool.end();
 });
 
-const {
-  rows: [row],
-} = await pool.query('SELECT NOW()');
-console.log(row);
 const port = 9999;
 const status = {
   //статусы ответа
@@ -30,6 +25,7 @@ const status = {
   ok: 200,
   noteFound: 404,
 };
+
 let dynamicId = 0;
 const path = '/posts';
 
@@ -50,27 +46,33 @@ const sendResponse = {
 
 const methods = new Map();
 
-methods.set(`${path}.post`, function (request, response) {
+methods.set(`${path}.post`, async function (request, response) {
   //Добавление поста
   const url = new URL(request.url, `http://${request.headers.host}`);
   const { searchParams } = url;
   const content = searchParams.get('content');
+
   if (!content) {
     sendResponse.bad(response);
     return;
   }
+
   const post = {
     id: dynamicId++,
     content: content,
     created: Date.now(),
     removed: false,
   };
+  const newPostQuery = await pool.query(
+    `INSERT INTO posts ( content)
+	VALUES ('${post.content}') RETURNING id , content , removed , created;`
+  );
   sendResponse.ok(response);
-  response.end(JSON.stringify(post));
+  response.end(JSON.stringify(newPostQuery.rows[0]));
   posts.unshift(post);
 });
 
-methods.set(`${path}.edit`, function (request, response) {
+methods.set(`${path}.edit`, async function (request, response) {
   //Редактирование поста
   const url = new URL(request.url, `http://${request.headers.host}`);
   const { searchParams } = url;
@@ -81,27 +83,35 @@ methods.set(`${path}.edit`, function (request, response) {
     return;
   }
 
-  const findedPost = posts.find((el) => el.id === id);
+  const findedPost = await pool.query(
+    `UPDATE posts SET content = '${content}'  WHERE id = ${id} AND removed = FALSE RETURNING id , content , removed , created;`
+  );
 
-  if (!findedPost || findedPost.removed) {
+  if (!findedPost.rows[0]) {
     sendResponse.notFound(response);
     return;
   }
 
-  findedPost.content = content;
 
   sendResponse.ok(response);
-  response.end(JSON.stringify(findedPost));
+  response.end(JSON.stringify(findedPost.rows[0]));
 });
 
-methods.set(`${path}.get`, function (request, response) {
+methods.set(`${path}.get`, async function (request, response) {
   //Получение всех постов
   sendResponse.ok(response);
-  const actualPosts = posts.filter((item) => item.removed === false);
-  response.end(JSON.stringify(actualPosts));
+
+  const actualPosts = await pool.query(`SELECT id,
+  content,
+removed ,
+  created
+FROM posts WHERE removed = FALSE;`);
+
+
+  response.end(JSON.stringify(actualPosts.rows.reverse()));
 });
 
-methods.set(`${path}.delete`, function (request, response) {
+methods.set(`${path}.delete`, async function (request, response) {
   //Удаление поста
   const url = new URL(request.url, `http://${request.headers.host}`);
   const { searchParams } = url;
@@ -111,44 +121,50 @@ methods.set(`${path}.delete`, function (request, response) {
     return;
   }
 
-  const findedPost = posts.find((el) => el.id === id);
+  const findedPost = await pool.query(
+    `UPDATE posts SET removed = TRUE  WHERE id = ${id} AND removed = FALSE RETURNING id , content , removed , created;`
+  );
 
-  if (!findedPost || findedPost.removed) {
+  if (!findedPost.rows[0]) {
     sendResponse.notFound(response);
     return;
   }
 
   sendResponse.ok(response);
-  findedPost.removed = true;
 
-  response.end(JSON.stringify(findedPost));
+
+  response.end(JSON.stringify(findedPost.rows[0]));
 });
 
-methods.set(`${path}.restore`, function (request, response) {
+methods.set(`${path}.restore`, async function (request, response) {
   //Востановление удаленного поста
   const url = new URL(request.url, `http://${request.headers.host}`);
   const { searchParams } = url;
   const id = Number(searchParams.get('id'));
 
-  const findedPost = posts.find((el) => el.id === id);
-  if (!id || (findedPost && !findedPost.removed)) {
+
+  if (!id) {
     sendResponse.bad(response);
     response.end();
     return;
   }
+  const findedPost = await pool.query(
+    `UPDATE posts SET removed = FALSE  WHERE id = ${id} AND removed = TRUE RETURNING id , content , removed , created;`
+  );
 
-  if (!findedPost) {
+
+  if (!findedPost.rows[0]) {
     sendResponse.notFound(response);
     response.end();
     return;
   }
 
-  findedPost.removed = false;
+  //findedPost.removed = false;
   sendResponse.ok(response);
-  response.end(JSON.stringify(findedPost));
+  response.end(JSON.stringify(findedPost.rows[0]));
 });
 
-methods.set(`${path}.getById`, function (request, response) {
+methods.set(`${path}.getById`, async function (request, response) {
   //Получение поста по id
   const url = new URL(request.url, `http://${request.headers.host}`);
   const id = Number(url.searchParams.get('id'));
@@ -156,13 +172,18 @@ methods.set(`${path}.getById`, function (request, response) {
     sendResponse.bad(response);
     return;
   }
-  const findedPost = posts.find((el) => el.id === id);
-  if (!findedPost || findedPost.removed) {
+
+
+  const findedPost = await pool.query(
+    `SELECT id , content , removed , created FROM posts WHERE id = ${id} AND removed = FALSE`
+  );
+
+  if (!findedPost.rows[0]) {
     sendResponse.notFound(response);
     return;
   }
   sendResponse.ok(response);
-  response.end(JSON.stringify(findedPost));
+  response.end(JSON.stringify(findedPost.rows[0]));
 });
 
 const server = new http.createServer((request, response) => {
